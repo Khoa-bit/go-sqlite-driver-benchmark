@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"zombiezen.com/go/sqlite"
 	"zombiezen.com/go/sqlite/sqlitex"
 )
 
@@ -69,39 +70,23 @@ func (d *ZombieDriver) Insert(ctx context.Context, name, email string, age int, 
 	return wc.Conn.LastInsertRowID(), nil
 }
 
-func (d *ZombieDriver) BatchInsert(ctx context.Context, rows []UserRow) error {
+func (d *ZombieDriver) BatchInsert(ctx context.Context, rows []UserRow) (err error) {
 	wc, done := d.pool.TakeWriteConn(ctx)
 	defer done()
-
-	err := sqlitex.Execute(wc.Conn, "BEGIN IMMEDIATE", nil)
-	if err != nil {
-		return fmt.Errorf("batch begin: %w", err)
-	}
-
-	insStmt, err := wc.Conn.Prepare(
-		`INSERT INTO benchmark_users (name, email, age, balance, is_active, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, 1, ?, ?)`)
-	if err != nil {
-		return fmt.Errorf("batch prepare: %w", err)
-	}
-	defer insStmt.Finalize()
+	defer sqlitex.Save(wc.Conn)(&err)
 
 	for i := range rows {
-		insStmt.Reset()
-		insStmt.BindText(1, rows[i].Name)
-		insStmt.BindText(2, rows[i].Email)
-		insStmt.BindInt64(3, int64(rows[i].Age))
-		insStmt.BindFloat(4, rows[i].Balance)
-		insStmt.BindText(5, rows[i].CreatedAt)
-		insStmt.BindText(6, rows[i].UpdatedAt)
-		if _, err := insStmt.Step(); err != nil {
+		err = sqlitex.Execute(wc.Conn,
+			`INSERT INTO benchmark_users (name, email, age, balance, is_active, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, 1, ?, ?)`,
+			&sqlitex.ExecOptions{
+				Args: []any{rows[i].Name, rows[i].Email, rows[i].Age, rows[i].Balance, rows[i].CreatedAt, rows[i].UpdatedAt},
+			})
+		if err != nil {
 			return fmt.Errorf("batch insert %d: %w", i, err)
 		}
 	}
 
-	if err := sqlitex.Execute(wc.Conn, "COMMIT", nil); err != nil {
-		return fmt.Errorf("batch commit: %w", err)
-	}
 	return nil
 }
 
@@ -109,65 +94,58 @@ func (d *ZombieDriver) SelectByPK(ctx context.Context, id int64) (UserRow, error
 	rc, done := d.pool.TakeReadConn(ctx)
 	defer done()
 
-	stmt, err := rc.Conn.Prepare("SELECT id, name, email, age, balance, created_at, updated_at FROM benchmark_users WHERE id = ?")
+	var row UserRow
+	found := false
+	err := sqlitex.Execute(rc.Conn,
+		"SELECT id, name, email, age, balance, created_at, updated_at FROM benchmark_users WHERE id = ?",
+		&sqlitex.ExecOptions{
+			Args: []any{id},
+			ResultFunc: func(stmt *sqlite.Stmt) error {
+				found = true
+				row = UserRow{
+					ID:        stmt.ColumnInt64(0),
+					Name:      stmt.ColumnText(1),
+					Email:     stmt.ColumnText(2),
+					Age:       int(stmt.ColumnInt64(3)),
+					Balance:   stmt.ColumnFloat(4),
+					CreatedAt: stmt.ColumnText(5),
+					UpdatedAt: stmt.ColumnText(6),
+				}
+				return nil
+			},
+		})
 	if err != nil {
 		return UserRow{}, err
 	}
-	defer stmt.Finalize()
-
-	stmt.BindInt64(1, id)
-	hasRow, err := stmt.Step()
-	if err != nil {
-		return UserRow{}, err
-	}
-	if !hasRow {
+	if !found {
 		return UserRow{}, fmt.Errorf("user %d not found", id)
 	}
-
-	return UserRow{
-		ID:        stmt.ColumnInt64(0),
-		Name:      stmt.ColumnText(1),
-		Email:     stmt.ColumnText(2),
-		Age:       int(stmt.ColumnInt64(3)),
-		Balance:   stmt.ColumnFloat(4),
-		CreatedAt: stmt.ColumnText(5),
-		UpdatedAt: stmt.ColumnText(6),
-	}, nil
+	return row, nil
 }
 
 func (d *ZombieDriver) SelectByAgeRange(ctx context.Context, minAge, maxAge int) ([]UserRow, error) {
 	rc, done := d.pool.TakeReadConn(ctx)
 	defer done()
 
-	stmt, err := rc.Conn.Prepare("SELECT id, name, email, age, balance, created_at, updated_at FROM benchmark_users WHERE age BETWEEN ? AND ?")
-	if err != nil {
-		return nil, err
-	}
-	defer stmt.Finalize()
-
-	stmt.BindInt64(1, int64(minAge))
-	stmt.BindInt64(2, int64(maxAge))
-
 	var rows []UserRow
-	for {
-		hasRow, err := stmt.Step()
-		if err != nil {
-			return nil, err
-		}
-		if !hasRow {
-			break
-		}
-		rows = append(rows, UserRow{
-			ID:        stmt.ColumnInt64(0),
-			Name:      stmt.ColumnText(1),
-			Email:     stmt.ColumnText(2),
-			Age:       int(stmt.ColumnInt64(3)),
-			Balance:   stmt.ColumnFloat(4),
-			CreatedAt: stmt.ColumnText(5),
-			UpdatedAt: stmt.ColumnText(6),
+	err := sqlitex.Execute(rc.Conn,
+		"SELECT id, name, email, age, balance, created_at, updated_at FROM benchmark_users WHERE age BETWEEN ? AND ?",
+		&sqlitex.ExecOptions{
+			Args: []any{minAge, maxAge},
+			ResultFunc: func(stmt *sqlite.Stmt) error {
+				rows = append(rows, UserRow{
+					ID:        stmt.ColumnInt64(0),
+					Name:      stmt.ColumnText(1),
+					Email:     stmt.ColumnText(2),
+					Age:       int(stmt.ColumnInt64(3)),
+					Balance:   stmt.ColumnFloat(4),
+					CreatedAt: stmt.ColumnText(5),
+					UpdatedAt: stmt.ColumnText(6),
+				})
+				return nil
+			},
 		})
-	}
-	return rows, nil
+	return rows, err
 }
 
 func (d *ZombieDriver) UpdateEmail(ctx context.Context, id int64, newEmail string) error {
@@ -239,10 +217,14 @@ func (d *ModerncDriver) Name() string { return "modernc" }
 
 func (d *ModerncDriver) Insert(ctx context.Context, name, email string, age int, balance float64) (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := d.pool.WriteDB.ExecContext(ctx,
+	stmt, err := d.pool.WriteDB.PrepareContext(ctx,
 		`INSERT INTO benchmark_users (name, email, age, balance, is_active, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, 1, ?, ?)`,
-		name, email, age, balance, now, now)
+		 VALUES (?, ?, ?, ?, 1, ?, ?)`)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+	res, err := stmt.ExecContext(ctx, name, email, age, balance, now, now)
 	if err != nil {
 		return 0, err
 	}
@@ -274,17 +256,26 @@ func (d *ModerncDriver) BatchInsert(ctx context.Context, rows []UserRow) error {
 }
 
 func (d *ModerncDriver) SelectByPK(ctx context.Context, id int64) (UserRow, error) {
-	row := d.pool.ReadDB.QueryRowContext(ctx,
-		"SELECT id, name, email, age, balance, created_at, updated_at FROM benchmark_users WHERE id = ?", id)
+	stmt, err := d.pool.ReadDB.PrepareContext(ctx,
+		"SELECT id, name, email, age, balance, created_at, updated_at FROM benchmark_users WHERE id = ?")
+	if err != nil {
+		return UserRow{}, err
+	}
+	defer stmt.Close()
+	row := stmt.QueryRowContext(ctx, id)
 	var r UserRow
-	err := row.Scan(&r.ID, &r.Name, &r.Email, &r.Age, &r.Balance, &r.CreatedAt, &r.UpdatedAt)
+	err = row.Scan(&r.ID, &r.Name, &r.Email, &r.Age, &r.Balance, &r.CreatedAt, &r.UpdatedAt)
 	return r, err
 }
 
 func (d *ModerncDriver) SelectByAgeRange(ctx context.Context, minAge, maxAge int) ([]UserRow, error) {
-	rows, err := d.pool.ReadDB.QueryContext(ctx,
-		"SELECT id, name, email, age, balance, created_at, updated_at FROM benchmark_users WHERE age BETWEEN ? AND ?",
-		minAge, maxAge)
+	stmt, err := d.pool.ReadDB.PrepareContext(ctx,
+		"SELECT id, name, email, age, balance, created_at, updated_at FROM benchmark_users WHERE age BETWEEN ? AND ?")
+	if err != nil {
+		return nil, err
+	}
+	defer stmt.Close()
+	rows, err := stmt.QueryContext(ctx, minAge, maxAge)
 	if err != nil {
 		return nil, err
 	}
@@ -302,15 +293,24 @@ func (d *ModerncDriver) SelectByAgeRange(ctx context.Context, minAge, maxAge int
 }
 
 func (d *ModerncDriver) UpdateEmail(ctx context.Context, id int64, newEmail string) error {
-	_, err := d.pool.WriteDB.ExecContext(ctx,
-		"UPDATE benchmark_users SET email = ?, updated_at = ? WHERE id = ?",
-		newEmail, time.Now().UTC().Format(time.RFC3339), id)
+	stmt, err := d.pool.WriteDB.PrepareContext(ctx,
+		"UPDATE benchmark_users SET email = ?, updated_at = ? WHERE id = ?")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	_, err = stmt.ExecContext(ctx, newEmail, time.Now().UTC().Format(time.RFC3339), id)
 	return err
 }
 
 func (d *ModerncDriver) Delete(ctx context.Context, id int64) error {
-	_, err := d.pool.WriteDB.ExecContext(ctx,
-		"DELETE FROM benchmark_users WHERE id = ?", id)
+	stmt, err := d.pool.WriteDB.PrepareContext(ctx,
+		"DELETE FROM benchmark_users WHERE id = ?")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	_, err = stmt.ExecContext(ctx, id)
 	return err
 }
 

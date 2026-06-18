@@ -50,17 +50,12 @@ func CreateSchemaModernc(db *sql.DB) error {
 }
 
 // SeedDataZombie inserts n rows into benchmark_users via a zombie *sqlite.Conn.
-// Uses a single transaction for speed. Returns the inserted IDs.
-func SeedDataZombie(conn *sqlite.Conn, n int) ([]int64, error) {
+// Uses sqlitex.Save for automatic BEGIN/COMMIT/ROLLBACK handling.
+func SeedDataZombie(conn *sqlite.Conn, n int) (_ []int64, err error) {
+	defer sqlitex.Save(conn)(&err)
+
 	now := time.Now().UTC().Format(time.RFC3339)
 	ids := make([]int64, 0, n)
-
-	// Use a function-based helper to run everything in one transaction.
-	err := sqlitex.Execute(conn,
-		"BEGIN IMMEDIATE", nil)
-	if err != nil {
-		return nil, fmt.Errorf("seed begin: %w", err)
-	}
 
 	insStmt, err := conn.Prepare(
 		`INSERT INTO benchmark_users (name, email, age, balance, is_active, created_at, updated_at)
@@ -92,11 +87,6 @@ func SeedDataZombie(conn *sqlite.Conn, n int) ([]int64, error) {
 			return nil, fmt.Errorf("seed insert %d: unexpected row from INSERT", i)
 		}
 		ids = append(ids, conn.LastInsertRowID())
-	}
-
-	err = sqlitex.Execute(conn, "COMMIT", nil)
-	if err != nil {
-		return nil, fmt.Errorf("seed commit: %w", err)
 	}
 
 	return ids, nil
