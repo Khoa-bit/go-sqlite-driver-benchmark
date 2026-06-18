@@ -37,6 +37,17 @@ type Driver interface {
 
 	// ConcurrentReads runs N goroutines each doing SelectByPK on random IDs.
 	ConcurrentReads(ctx context.Context, ids []int64, concurrency int) error
+
+	// ContentionWriteRead runs multiple readers concurrently with a single writer.
+	// readerCount goroutines each execute opsPerReader SelectByPK calls,
+	// while 1 writer goroutine executes writerOps Insert calls.
+	ContentionWriteRead(ctx context.Context, ids []int64, readerCount, opsPerReader, writerOps int) error
+
+	// TxWriteOnly executes a pure-write transaction: INSERT → UPDATE → DELETE on the same row.
+	TxWriteOnly(ctx context.Context) error
+
+	// TxReadWrite executes a mixed read+write transaction: SELECT by PK → UPDATE email.
+	TxReadWrite(ctx context.Context, id int64, newEmail string) error
 }
 
 // ────────────────────────────  Zombie  ────────────────────────────
@@ -201,6 +212,126 @@ func (d *ZombieDriver) ConcurrentReads(ctx context.Context, ids []int64, concurr
 	return nil
 }
 
+func (d *ZombieDriver) ContentionWriteRead(ctx context.Context, ids []int64, readerCount, opsPerReader, writerOps int) error {
+	var wg sync.WaitGroup
+	errCh := make(chan error, readerCount+1)
+
+	// Launch reader goroutines.
+	for i := 0; i < readerCount; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < opsPerReader; j++ {
+				id := ids[(i*opsPerReader+j)%len(ids)]
+				if _, err := d.SelectByPK(ctx, id); err != nil {
+					select {
+					case errCh <- err:
+					default:
+					}
+					return
+				}
+			}
+		}()
+	}
+
+	// Launch 1 writer goroutine.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for k := 0; k < writerOps; k++ {
+			_, err := d.Insert(ctx,
+				fmt.Sprintf("contend_w_%d", k),
+				fmt.Sprintf("contend_w_%d@example.com", k),
+				30, float64(k),
+			)
+			if err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(errCh)
+
+	if err, ok := <-errCh; ok {
+		return err
+	}
+	return nil
+}
+
+func (d *ZombieDriver) TxWriteOnly(ctx context.Context) (err error) {
+	wc, done := d.pool.TakeWriteConn(ctx)
+	defer done()
+	defer sqlitex.Save(wc.Conn)(&err)
+
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// INSERT
+	err = sqlitex.Execute(wc.Conn,
+		`INSERT INTO benchmark_users (name, email, age, balance, is_active, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, 1, ?, ?)`,
+		&sqlitex.ExecOptions{
+			Args: []any{"tx_write_only", "tx_wo@example.com", 30, 100.0, now, now},
+		})
+	if err != nil {
+		return err
+	}
+	id := wc.Conn.LastInsertRowID()
+
+	// UPDATE
+	err = sqlitex.Execute(wc.Conn,
+		"UPDATE benchmark_users SET email = ?, updated_at = ? WHERE id = ?",
+		&sqlitex.ExecOptions{
+			Args: []any{"tx_wo_updated@example.com", now, id},
+		})
+	if err != nil {
+		return err
+	}
+
+	// DELETE
+	return sqlitex.Execute(wc.Conn,
+		"DELETE FROM benchmark_users WHERE id = ?",
+		&sqlitex.ExecOptions{Args: []any{id}})
+}
+
+func (d *ZombieDriver) TxReadWrite(ctx context.Context, id int64, newEmail string) (err error) {
+	wc, done := d.pool.TakeWriteConn(ctx)
+	defer done()
+	defer sqlitex.Save(wc.Conn)(&err)
+
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// SELECT
+	var found bool
+	err = sqlitex.Execute(wc.Conn,
+		"SELECT id FROM benchmark_users WHERE id = ?",
+		&sqlitex.ExecOptions{
+			Args: []any{id},
+			ResultFunc: func(stmt *sqlite.Stmt) error {
+				found = true
+				return nil
+			},
+		})
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("user %d not found", id)
+	}
+
+	// UPDATE
+	return sqlitex.Execute(wc.Conn,
+		"UPDATE benchmark_users SET email = ?, updated_at = ? WHERE id = ?",
+		&sqlitex.ExecOptions{
+			Args: []any{newEmail, now, id},
+		})
+}
+
 // ────────────────────────────  Modernc  ────────────────────────────
 
 // ModerncDriver implements Driver using the modernc SQLite driver.
@@ -345,4 +476,121 @@ func (d *ModerncDriver) ConcurrentReads(ctx context.Context, ids []int64, concur
 		return err
 	}
 	return nil
+}
+
+func (d *ModerncDriver) ContentionWriteRead(ctx context.Context, ids []int64, readerCount, opsPerReader, writerOps int) error {
+	var wg sync.WaitGroup
+	errCh := make(chan error, readerCount+1)
+
+	// Launch reader goroutines.
+	for i := 0; i < readerCount; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < opsPerReader; j++ {
+				id := ids[(i*opsPerReader+j)%len(ids)]
+				if _, err := d.SelectByPK(ctx, id); err != nil {
+					select {
+					case errCh <- err:
+					default:
+					}
+					return
+				}
+			}
+		}()
+	}
+
+	// Launch 1 writer goroutine.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for k := 0; k < writerOps; k++ {
+			_, err := d.Insert(ctx,
+				fmt.Sprintf("contend_w_%d", k),
+				fmt.Sprintf("contend_w_%d@example.com", k),
+				30, float64(k),
+			)
+			if err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(errCh)
+
+	if err, ok := <-errCh; ok {
+		return err
+	}
+	return nil
+}
+
+func (d *ModerncDriver) TxWriteOnly(ctx context.Context) error {
+	tx, err := d.pool.WriteDB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("tx write-only begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// INSERT
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO benchmark_users (name, email, age, balance, is_active, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, 1, ?, ?)`,
+		"tx_write_only", "tx_wo@example.com", 30, 100.0, now, now)
+	if err != nil {
+		return fmt.Errorf("tx write-only insert: %w", err)
+	}
+	id, _ := res.LastInsertId()
+
+	// UPDATE
+	_, err = tx.ExecContext(ctx,
+		"UPDATE benchmark_users SET email = ?, updated_at = ? WHERE id = ?",
+		"tx_wo_updated@example.com", now, id)
+	if err != nil {
+		return fmt.Errorf("tx write-only update: %w", err)
+	}
+
+	// DELETE
+	_, err = tx.ExecContext(ctx,
+		"DELETE FROM benchmark_users WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("tx write-only delete: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+func (d *ModerncDriver) TxReadWrite(ctx context.Context, id int64, newEmail string) error {
+	tx, err := d.pool.WriteDB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("tx read-write begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// SELECT
+	var foundID int64
+	err = tx.QueryRowContext(ctx,
+		"SELECT id FROM benchmark_users WHERE id = ?", id).Scan(&foundID)
+	if err != nil {
+		return fmt.Errorf("tx read-write select: %w", err)
+	}
+
+	// UPDATE
+	_, err = tx.ExecContext(ctx,
+		"UPDATE benchmark_users SET email = ?, updated_at = ? WHERE id = ?",
+		newEmail, now, id)
+	if err != nil {
+		return fmt.Errorf("tx read-write update: %w", err)
+	}
+
+	return tx.Commit()
 }

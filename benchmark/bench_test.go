@@ -264,6 +264,58 @@ func BenchmarkWriteThroughput(b *testing.B) {
 	})
 }
 
+func BenchmarkContention_WriteRead(b *testing.B) {
+	zombieDrv, moderncDrv, cleanup, ids := setupDrivers(b)
+	defer cleanup()
+
+	readerCount := runtime.NumCPU()
+	opsPerReader := 50       // reader-heavy: each reader does 50 reads
+	writerOps := readerCount // writer does 1 insert per reader
+
+	runBoth(b, zombieDrv, moderncDrv, func(b *testing.B, drv Driver) {
+		ctx := context.Background()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if err := drv.ContentionWriteRead(ctx, ids, readerCount, opsPerReader, writerOps); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+func BenchmarkTx_WriteOnly(b *testing.B) {
+	zombieDrv, moderncDrv, cleanup, _ := setupDrivers(b)
+	defer cleanup()
+
+	runBoth(b, zombieDrv, moderncDrv, func(b *testing.B, drv Driver) {
+		ctx := context.Background()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if err := drv.TxWriteOnly(ctx); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+func BenchmarkTx_ReadWrite(b *testing.B) {
+	zombieDrv, moderncDrv, cleanup, ids := setupDrivers(b)
+	defer cleanup()
+
+	runBoth(b, zombieDrv, moderncDrv, func(b *testing.B, drv Driver) {
+		ctx := context.Background()
+		rng := rand.New(rand.NewSource(42))
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			id := ids[rng.Intn(len(ids))]
+			newEmail := fmt.Sprintf("tx_rw_%d@example.com", i)
+			if err := drv.TxReadWrite(ctx, id, newEmail); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
 // ────────────────────────────  syncErrGroup (tiny helper)  ────────────────────────────
 
 type syncErrGroup struct {
