@@ -2,7 +2,7 @@ module khoa-sqlite-driver-benchmark
 
 go 1.26.4
 
-replace zombiezen.com/go/sqlite => C:\Users\KhoaNguyenAnh\References\go-sqlite
+replace zombiezen.com/go/sqlite => github.com/Khoa-bit/go-sqlite v0.0.0-20260322163314-070434db6b9d
 
 require (
 	modernc.org/sqlite v1.52.0
