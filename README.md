@@ -40,3 +40,17 @@ BenchmarkTx_ReadWrite/modernc-16                   14104            244302 ns/op
 PASS
 ok      khoa-sqlite-driver-benchmark/benchmark  121.155s
 ```
+
+|Zombie|CPU % faster|Memory % faster|
+|---|---|---|
+|BenchmarkInsert_Single/zombie-16|1.04|1.36|
+|BenchmarkInsert_Batch/zombie-16|1.10|4.67|
+|BenchmarkSelect_ByPK/zombie-16|1.16|2.53|
+|BenchmarkSelect_RangeScan/zombie-16|1.28|1.47|
+|BenchmarkUpdate/zombie-16|1.29|1.27|
+|BenchmarkDelete/zombie-16|1.16|1.23|
+|BenchmarkConcurrentReads/zombie-16|15.12|3.12|
+|BenchmarkWriteThroughput/zombie-16|1.34|1.56|
+|BenchmarkContention_WriteRead/zombie-16|4.58|2.70|
+|BenchmarkTx_WriteOnly/zombie-16|1.31|1.14|
+|BenchmarkTx_ReadWrite/zombie-16|1.46|1.20|
