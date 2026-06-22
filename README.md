@@ -41,7 +41,7 @@ PASS
 ok      khoa-sqlite-driver-benchmark/benchmark  121.155s
 ```
 
-|Zombie|CPU % faster|Memory % faster|
+|Zombie|CPU x faster|Memory x reduction|
 |---|---|---|
 |BenchmarkInsert_Single/zombie-16|1.04|1.36|
 |BenchmarkInsert_Batch/zombie-16|1.10|4.67|
